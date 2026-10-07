@@ -1498,8 +1498,11 @@ describe("per-scope selection signal", () => {
     const claudeAllModels = scopes(claude).get("all_models");
     const cursorAllModels = scopes(cursor).get("all_models");
 
-    expect(claudeAllModels).toBeCloseTo(0.444, 3);
-    expect(cursorAllModels).toBeCloseTo(0.075, 3);
+    // Long windows earn their projected-forfeiture credit only for the
+    // elapsed share of the cycle: 28.6% of Claude's week, 66.7% of Cursor's
+    // billing month.
+    expect(claudeAllModels).toBeCloseTo(0.1527, 3);
+    expect(cursorAllModels).toBeCloseTo(0.05, 3);
     expect(claudeAllModels!).toBeGreaterThan(0);
     expect(claudeAllModels!).toBeGreaterThan(cursorAllModels!);
   });
@@ -1508,7 +1511,7 @@ describe("per-scope selection signal", () => {
     const claudeScopes = scopes(claude);
     const fable = claudeScopes.get("model:fable");
 
-    expect(fable).toBeCloseTo(0.794, 3);
+    expect(fable).toBeCloseTo(0.24, 3);
     for (const [scope, value] of claudeScopes) {
       if (scope === "model:fable") continue;
       expect(fable!).toBeGreaterThan(value!);

@@ -34,6 +34,8 @@ const NOT_SELECTING = new Set([
   "XDG_CACHE_HOME",
   // Names a snapshot file that answers instead of every provider
   "QUOTA_AXI_SNAPSHOT",
+  // Names the in-flight worker file, folded in at report time and never cached
+  "QUOTA_AXI_INFLIGHT",
 ]);
 
 /** A value no real environment holds, so the cache can be searched for it */

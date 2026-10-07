@@ -21,9 +21,10 @@ notes:
   Every quota read, including each --tui refresh, may delegate an expired session's renewal to the vendor CLI that owns it. --no-credential-refresh disables delegated credential refresh; auth is always read-only.
   {"tui":{"show":"used"}} in ~/.config/quota-axi/config.json (or $XDG_CONFIG_HOME/quota-axi/config.json) makes --tui draw what each window has used instead of what is left; it never changes TOON or JSON.
   Every read asks the vendor unless --max-age <duration> or QUOTA_AXI_MAX_AGE (the flag wins) opts into reuse: a provider's last successful reading is then served while younger than that bound and the credential selection and local credential files are unchanged, and processes starting together make one vendor read. --full ignores QUOTA_AXI_MAX_AGE, and --tui r always reads the vendor. A reused reading stays fresh and carries reused true plus its original refreshedAt. QUOTA_AXI_SNAPSHOT=<cache-format file> answers every provider from that file instead, for tests and fixtures.
+  --inflight <file> or QUOTA_AXI_INFLIGHT (the flag wins) names a {"schemaVersion":1,"updatedAt":...,"workers":[{"provider":...,"count":N}]} file of live workers per provider; their projected burn is folded into runway and spendPriority, which it can only lower. Absent, nothing is read.
   --profile-only requires explicit CLAUDE_CONFIG_DIR or CODEX_HOME plus exactly one matching provider. It reads only that credential file: no Keychain, Pi, CLI RPC, fallback, refresh, or cache. With --full --json, non-secret account identity, source, and attempts remain visible; tokens and file contents remain excluded, and ordinary output remains redacted.
-flags[16]:
-  --provider <${PROVIDER_IDS.join(",")}>, --json, --full, --tui, --refresh <30s-24h>, --once, --all, --max-age <0-1h>, --allow-keychain-prompt, --allow-claude-inference, --no-credential-refresh, --profile-only, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
+flags[17]:
+  --provider <${PROVIDER_IDS.join(",")}>, --json, --full, --tui, --refresh <30s-24h>, --once, --all, --max-age <0-1h>, --inflight <file>, --allow-keychain-prompt, --allow-claude-inference, --no-credential-refresh, --profile-only, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
 examples:
   quota-axi
   quota-axi --provider claude
@@ -39,6 +40,7 @@ examples:
   quota-axi --tui --all
   quota-axi --no-credential-refresh
   quota-axi --json --max-age 90s
+  quota-axi --inflight ~/.local/state/inflight.json
   quota-axi --tui --no-credential-refresh
   quota-axi auth
   quota-axi models --intelligence high

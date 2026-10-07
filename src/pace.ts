@@ -34,6 +34,21 @@ export const UNOPENED_WINDOW_MAX_FUTURE_START_SKEW_SECONDS = 5 * 60;
  */
 export const SELECTION_MIN_TIME_REMAINING_PERCENT = 0.01;
 
+/**
+ * A window whose cycle is at least this long is a long window: its allowance
+ * has to last days, so being early in the cycle with nearly all of it left is
+ * not evidence that it will reach reset unused. Six days keeps every weekly
+ * cycle in, including one whose trusted start and reset are a little short of
+ * exactly seven days apart.
+ */
+export const LONG_WINDOW_MIN_CYCLE_SECONDS = 6 * 86_400;
+
+/**
+ * Projected extra burn from in-flight workers, keyed by bounding window id, in
+ * percentage points of that window per hour for the whole in-flight load.
+ */
+export type InflightLoad = ReadonlyMap<string, number>;
+
 type PaceOptions = {
   stale?: boolean;
 };
@@ -104,9 +119,15 @@ export function computeWindowPace(
   return pace;
 }
 
+/**
+ * @param inflight optional extra burn from in-flight workers. A window it
+ * names is projected at the faster of its observed cycle-average burn and that
+ * load, as if the load continues, so the load can only bring exhaustion closer.
+ */
 export function computeEffectiveRunway(
   windows: QuotaWindow[],
   generatedAt: string,
+  inflight?: InflightLoad,
 ): EffectiveRunway {
   const generatedAtMs = Date.parse(generatedAt);
 
@@ -145,12 +166,14 @@ export function computeEffectiveRunway(
   const accountBoundsEstablishRunway =
     windows.some(({ kind }) => kind === "model") &&
     accountWindows.length > 0 &&
-    computeEffectiveRunway(accountWindows, generatedAt).status !== "unknown";
+    computeEffectiveRunway(accountWindows, generatedAt, inflight).status !==
+      "unknown";
 
   const unmeasurableWindowIds: string[] = [];
   const projections: Array<{
     window: QuotaWindow;
     exhaustedAtMs: number;
+    confidence: NonNullable<EffectiveRunway["projectionConfidence"]>;
   }> = [];
   let lowestConfidence: EffectiveRunway["projectionConfidence"] = "established";
 
@@ -206,29 +229,48 @@ export function computeEffectiveRunway(
       unmeasurableWindowIds.push(window.id);
       continue;
     }
-    const resetsAtMs = resetsAt.ms;
+    const resetsAtMs = budgetResetsAtMs(window, pace, resetsAt.ms);
+    const loadExhaustedAtMs = inflightExhaustionMs(
+      remaining,
+      inflight?.get(window.id),
+      generatedAtMs,
+    );
 
     if (isZeroUse(window, remaining)) {
-      if ((pace.elapsedPercent ?? 0) < PACE_EARLY_ELAPSED_PERCENT) {
-        lowestConfidence = "early";
+      const confidence = elapsedConfidence(pace);
+      if (confidence === "early") lowestConfidence = "early";
+      if (loadExhaustedAtMs !== undefined && loadExhaustedAtMs < resetsAtMs) {
+        projections.push({
+          window,
+          exhaustedAtMs: loadExhaustedAtMs,
+          confidence,
+        });
       }
       continue;
     }
 
     // A window pace only carries a projection pair when the cycle-average
     // projection succeeded, so the pair itself is the basis check.
-    const exhaustedAtMs = parseTimestamp(pace?.projectedExhaustedAt);
+    const cycleExhaustedAtMs = parseTimestamp(pace?.projectedExhaustedAt);
     if (
-      exhaustedAtMs === undefined ||
-      exhaustedAtMs <= generatedAtMs ||
+      cycleExhaustedAtMs === undefined ||
+      cycleExhaustedAtMs <= generatedAtMs ||
       pace?.projectionConfidence === undefined
     ) {
       unmeasurableWindowIds.push(window.id);
       continue;
     }
     if (pace.projectionConfidence === "early") lowestConfidence = "early";
+    const exhaustedAtMs =
+      loadExhaustedAtMs === undefined
+        ? cycleExhaustedAtMs
+        : Math.min(cycleExhaustedAtMs, loadExhaustedAtMs);
     if (exhaustedAtMs < resetsAtMs) {
-      projections.push({ window, exhaustedAtMs });
+      projections.push({
+        window,
+        exhaustedAtMs,
+        confidence: pace.projectionConfidence,
+      });
     }
   }
 
@@ -254,8 +296,50 @@ export function computeEffectiveRunway(
     ),
     projectedExhaustedAt: new Date(limiting.exhaustedAtMs).toISOString(),
     limitingWindowId: limiting.window.id,
-    projectionConfidence: limiting.window.pace?.projectionConfidence,
+    projectionConfidence: limiting.confidence,
   };
+}
+
+/**
+ * When the in-flight load alone would spend `percentRemaining`, or undefined
+ * when there is no positive load or the instant is not representable.
+ */
+function inflightExhaustionMs(
+  percentRemaining: number,
+  percentPerHour: number | undefined,
+  generatedAtMs: number,
+): number | undefined {
+  if (percentPerHour === undefined || !(percentPerHour > 0)) return undefined;
+  const exhaustedAtMs =
+    generatedAtMs + (percentRemaining / percentPerHour) * 3_600_000;
+  return isRepresentableDateMs(exhaustedAtMs) ? exhaustedAtMs : undefined;
+}
+
+/**
+ * The end of the window's budget clock: its vendor reset, or the end of the
+ * full cycle restarted at an observed vendor reset, so a restarted allowance
+ * still has to last a whole cycle.
+ */
+function budgetResetsAtMs(
+  window: QuotaWindow,
+  pace: QuotaPace,
+  vendorResetsAtMs: number,
+): number {
+  if (pace.cycleBasis !== "observed_reset") return vendorResetsAtMs;
+  const startsAtMs = parseTimestamp(window.observedResetAt);
+  const cycleSeconds = finiteNumber(pace.cycleSeconds);
+  if (startsAtMs === undefined || cycleSeconds === undefined) {
+    return vendorResetsAtMs;
+  }
+  return Math.max(vendorResetsAtMs, startsAtMs + cycleSeconds * 1000);
+}
+
+function elapsedConfidence(
+  pace: QuotaPace,
+): NonNullable<EffectiveRunway["projectionConfidence"]> {
+  return (pace.elapsedPercent ?? 0) < PACE_EARLY_ELAPSED_PERCENT
+    ? "early"
+    : "established";
 }
 
 export function summarizeEffectivePace(
@@ -331,6 +415,9 @@ export function summarizeEffectivePace(
  * is on track to reach reset unused; `0` is exact utilization; negative means
  * the window is overdrawn against its reset clock.
  *
+ * On a long window a positive `gap_w` is scaled by the elapsed share of its
+ * cycle, and in-flight load raises `burnMultiple_w` (see `windowSelectionGap`).
+ *
  * Any bounding window without usable pace makes the whole scope unmeasurable:
  * an unknown window is never assumed healthy and never defaults to zero. The
  * one exception is a not-yet-triggered window - no `resetsAt` at all plus zero
@@ -341,6 +428,7 @@ export function summarizeEffectivePace(
  */
 export function summarizeEffectiveSelection(
   windows: QuotaWindow[],
+  inflight?: InflightLoad,
 ): EffectiveSelection {
   if (windows.length === 0) return { status: "unknown" };
 
@@ -349,7 +437,7 @@ export function summarizeEffectiveSelection(
   let cycleSecondsSum = 0;
 
   for (const window of windows) {
-    const gap = windowSelectionGap(window);
+    const gap = windowSelectionGap(window, inflight?.get(window.id));
     const cycleSeconds = finiteNumber(window.pace?.cycleSeconds);
     if (gap === undefined || cycleSeconds === undefined || cycleSeconds <= 0) {
       if (!isNotYetTriggeredZeroUse(window)) {
@@ -384,8 +472,20 @@ export function summarizeEffectiveSelection(
   };
 }
 
-/** The per-window selection term, or undefined when the window is unmeasurable. */
-function windowSelectionGap(window: QuotaWindow): number | undefined {
+/**
+ * The per-window selection term, or undefined when the window is unmeasurable.
+ *
+ * In-flight load projects the burn at the faster of the observed
+ * cycle-average and that load continuing. On a long window a positive term,
+ * allowance projected to reach reset unused, is credited only in proportion to
+ * the elapsed share of the cycle: the allowance has to last the rest of the
+ * window, so an early, barely used week is not freely spendable. A negative
+ * term is never scaled, so heavy early burn still reads as overdrawn at once.
+ */
+function windowSelectionGap(
+  window: QuotaWindow,
+  inflightPercentPerHour: number | undefined,
+): number | undefined {
   const pace = window.pace;
   if (pace === undefined || pace.status === "unknown") return undefined;
 
@@ -399,11 +499,46 @@ function windowSelectionGap(window: QuotaWindow): number | undefined {
     return undefined;
   }
 
-  const burnMultiple = resolveSelectionBurnMultiple(window, percentRemaining);
-  if (burnMultiple === undefined) return undefined;
+  const observedBurnMultiple = resolveSelectionBurnMultiple(
+    window,
+    percentRemaining,
+  );
+  if (observedBurnMultiple === undefined) return undefined;
+  const cycleSeconds = finiteNumber(pace.cycleSeconds);
+  const burnMultiple = Math.max(
+    observedBurnMultiple,
+    inflightBurnMultiple(inflightPercentPerHour, cycleSeconds),
+  );
 
   const gap = percentRemaining / timeRemainingPercent - burnMultiple;
-  return Number.isFinite(gap) ? gap : undefined;
+  if (!Number.isFinite(gap)) return undefined;
+  if (
+    gap > 0 &&
+    cycleSeconds !== undefined &&
+    cycleSeconds >= LONG_WINDOW_MIN_CYCLE_SECONDS
+  ) {
+    const elapsedPercent = finiteNumber(pace.elapsedPercent) ?? 0;
+    return gap * Math.min(1, Math.max(0, elapsedPercent / 100));
+  }
+  return gap;
+}
+
+/**
+ * The in-flight load as a burn multiple: percentage points of the window per
+ * percentage point of its cycle, the unit of `burnMultiple`.
+ */
+function inflightBurnMultiple(
+  percentPerHour: number | undefined,
+  cycleSeconds: number | undefined,
+): number {
+  if (
+    percentPerHour === undefined ||
+    !(percentPerHour > 0) ||
+    cycleSeconds === undefined
+  ) {
+    return 0;
+  }
+  return (percentPerHour * cycleSeconds) / 3600 / 100;
 }
 
 /**
@@ -499,6 +634,45 @@ function isProvablyUnopenedFutureCycle(
 }
 
 function resolveCycle(
+  window: QuotaWindow,
+  generatedAtMs: number,
+): { ok: true; value: ResolvedCycle } | { ok: false; reason: QuotaPaceReason } {
+  const scheduled = resolveScheduledCycle(window, generatedAtMs);
+  if (!scheduled.ok) return scheduled;
+  const restart = observedRestart(
+    window,
+    scheduled.value.cycleSeconds,
+    generatedAtMs,
+  );
+  return restart ? { ok: true, value: restart } : scheduled;
+}
+
+/**
+ * The budget clock of a window quota-axi saw the vendor reset before its
+ * schedule: a full cycle starting at the observed reset, so day one of a fresh
+ * budget is never measured against the old scheduled reset. Undefined when no
+ * restart applies or the restarted cycle is not current.
+ */
+function observedRestart(
+  window: QuotaWindow,
+  cycleSeconds: number,
+  generatedAtMs: number,
+): ResolvedCycle | undefined {
+  const startsAtMs = parseTimestamp(window.observedResetAt);
+  if (startsAtMs === undefined || startsAtMs > generatedAtMs) return undefined;
+  const resetsAtMs = startsAtMs + cycleSeconds * 1000;
+  if (!isRepresentableDateMs(resetsAtMs) || resetsAtMs <= generatedAtMs) {
+    return undefined;
+  }
+  return {
+    cycleSeconds,
+    startsAtMs,
+    resetsAtMs,
+    cycleBasis: "observed_reset",
+  };
+}
+
+function resolveScheduledCycle(
   window: QuotaWindow,
   generatedAtMs: number,
 ): { ok: true; value: ResolvedCycle } | { ok: false; reason: QuotaPaceReason } {

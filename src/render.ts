@@ -8,6 +8,7 @@ import type {
   AuthProviderReport,
   BoundConflict,
   EffectiveAvailability,
+  InflightInputState,
   ModelsResponse,
   ProviderId,
   ProviderQuota,
@@ -123,6 +124,7 @@ export function renderQuotaToon(
  */
 function quotaBlocks(response: QuotaAxiResponse): ProviderBlocks {
   const blocks: ProviderBlocks = { quota: [], exhaustion: [], attention: [] };
+  const inflightProblem = inflightInputDetail(response.inflight);
   for (const provider of response.providers) {
     const scopes = provider.quotaSemantics?.effectiveAvailability ?? [];
     const scopeAttention: AttentionRow[] = [];
@@ -144,6 +146,15 @@ function quotaBlocks(response: QuotaAxiResponse): ProviderBlocks {
         blocks.quota.push(quotaRow(provider, scope));
         const exhaustion = exhaustionRow(provider, scope);
         if (exhaustion) blocks.exhaustion.push(exhaustion);
+        if (scope.inflight) {
+          scopeAttention.push({
+            ...providerColumns(provider),
+            scope: scope.scope,
+            kind: "inflight",
+            detail: inflightDetail(scope),
+            remedy: NONE,
+          });
+        }
         const blocked = blockedSignals(scope);
         if (blocked) {
           scopeAttention.push({
@@ -160,6 +171,16 @@ function quotaBlocks(response: QuotaAxiResponse): ProviderBlocks {
     blocks.attention.push(
       ...providerAttention(provider, measured, scopeAttention.length),
     );
+    if (measured && inflightProblem) {
+      blocks.attention.push({
+        ...providerColumns(provider),
+        scope: "all",
+        kind: "inflight_input",
+        detail: inflightProblem,
+        remedy: NONE,
+      });
+    }
+    blocks.attention.push(...observedResetRows(provider));
     blocks.attention.push(...shareRows(provider));
     blocks.attention.push(...jobRows(provider));
     blocks.attention.push(...scopeAttention);
@@ -221,6 +242,48 @@ function providerAttention(
     ...providerStateRows(provider, measured, scopeRows),
     ...degradedSourceRows(provider),
   ];
+}
+
+/**
+ * Why the named in-flight input did not fold in cleanly, stated on every
+ * provider that has a quota row, since each of those rows is affected.
+ */
+function inflightInputDetail(
+  state: InflightInputState | undefined,
+): string | undefined {
+  if (!state || state.status === "applied") return undefined;
+  return [
+    state.status,
+    state.error,
+    state.updatedAt ? `updated ${state.updatedAt}` : undefined,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(DETAIL_SEPARATOR);
+}
+
+/** The worker count and the per-worker burn each bound assumed. */
+function inflightDetail(scope: EffectiveAvailability): string {
+  const inflight = scope.inflight;
+  if (!inflight) return UNKNOWN;
+  return [
+    `${inflight.workers} ${inflight.workers === 1 ? "worker" : "workers"}`,
+    ...inflight.windows.map(
+      ({ windowId, percentPerWorkerHour, basis }) =>
+        `${windowId} ${Number(percentPerWorkerHour.toFixed(4))} per worker-hour ${basis}`,
+    ),
+  ].join(DETAIL_SEPARATOR);
+}
+
+function observedResetRows(provider: ProviderQuota): AttentionRow[] {
+  return provider.windows
+    .filter((window) => window.observedResetAt)
+    .map((window) => ({
+      ...providerColumns(provider),
+      scope: "all",
+      kind: "observed_reset",
+      detail: `${window.id} reset early at ${window.observedResetAt}${DETAIL_SEPARATOR}scheduled ${window.resetsAt ?? UNKNOWN}`,
+      remedy: NONE,
+    }));
 }
 
 function shareRows(provider: ProviderQuota): AttentionRow[] {
