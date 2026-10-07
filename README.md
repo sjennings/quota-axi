@@ -195,7 +195,7 @@ $ quota-axi --provider claude --json
 $ quota-axi auth
 bin: ~/.npm/_npx/.../quota-axi
 description: Inspect local quota auth sources without printing secret values
-auth[42]{provider,source,path,status,error}:
+auth[44]{provider,source,path,status,error}:
   claude,oauth-file,~/.claude/.credentials.json,available,none
   claude,keychain,none,skipped,keychain_prompt_required
   codex,auth-json,~/.codex/auth.json,available,none
@@ -223,11 +223,13 @@ auth[42]{provider,source,path,status,error}:
   minimax,env:MINIMAX_API_KEY,none,missing,none
   minimax,pi:minimax,~/.pi/agent/auth.json,available,none
   minimax,minimax:config.json,~/.mmx/config.json,missing,none
+  minimax,opencode:auth.json,~/.local/share/opencode/auth.json,available,none
   mimo,env:MIMO_API_KEY,none,available,none
   mimo,pi:xiaomi,~/.pi/agent/auth.json,missing,none
   mimo,pi:xiaomi-token-plan-sgp,~/.pi/agent/auth.json,missing,none
   mimo,pi:xiaomi-token-plan-cn,~/.pi/agent/auth.json,missing,none
   mimo,pi:xiaomi-token-plan-ams,~/.pi/agent/auth.json,missing,none
+  mimo,opencode:auth.json,~/.local/share/opencode/auth.json,available,none
   deepseek,env:DEEPSEEK_API_KEY,none,missing,none
   deepseek,pi:deepseek,~/.pi/agent/auth.json,available,none
   openrouter,env:OPENROUTER_API_KEY,none,missing,none
@@ -927,8 +929,8 @@ Auth source entries can include `credentialPresent` when a source is not genuine
 | OpenCode Go    | `$XDG_DATA_HOME/opencode/auth.json` when set, `%LOCALAPPDATA%\opencode\auth.json` on Windows, otherwise `~/.local/share/opencode/auth.json`, for a literal `opencode-go` key with `opencode` fallback by default. When `QUOTA_AXI_OPENCODE_GO_PI_AUTH` is `1` or `true`, Pi's `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) literal `opencode-go` `api_key` entry is read first. This is opt-in so an unscoped run does not read an unrelated Pi store.                                                                |
 
 | Command Code | Pi's `$PI_CODING_AGENT_DIR/auth.json` `commandcode` entry first (default `~/.pi/agent/auth.json`), then `$COMMAND_CODE_API_KEY`, legacy `$COMMANDCODE_API_KEY`, production `~/.commandcode/auth.json` top-level `apiKey`, then `~/.omp/agent/auth.json` `commandcode`/`command-code`. Stored expiry is ignored: the credential is a non-expiring API key. |
-| MiniMax | `MINIMAX_API_KEY`, then `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) for a literal `minimax` key, then `$MMX_CONFIG_DIR/config.json` (default `~/.mmx/config.json`); `MINIMAX_BASE_URL` is accepted only for MiniMax first-party hosts |
-| MiMo | `MIMO_API_KEY`, then Pi's `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) literal `type: "api_key"` entries under `xiaomi`, `xiaomi-token-plan-sgp`, `xiaomi-token-plan-cn`, and `xiaomi-token-plan-ams`, each reported as its own `pi:<entry>` source; quota-axi does not read browser or dashboard state |
+| MiniMax | `MINIMAX_API_KEY`, then `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) for a literal `minimax` key, then `$MMX_CONFIG_DIR/config.json` (default `~/.mmx/config.json`), then opencode's `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` when set, `%LOCALAPPDATA%\opencode\auth.json` on Windows, otherwise `~/.local/share/opencode/auth.json`) for a literal key under `minimax-coding-plan`; `MINIMAX_BASE_URL` is accepted only for MiniMax first-party hosts |
+| MiMo | `MIMO_API_KEY`, then Pi's `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) literal `type: "api_key"` entries under `xiaomi`, `xiaomi-token-plan-sgp`, `xiaomi-token-plan-cn`, and `xiaomi-token-plan-ams`, each reported as its own `pi:<entry>` source, then opencode's `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` when set, `%LOCALAPPDATA%\opencode\auth.json` on Windows, otherwise `~/.local/share/opencode/auth.json`) for a literal key under `xiaomi-token-plan-sgp`; quota-axi does not read browser or dashboard state |
 | DeepSeek | `DEEPSEEK_API_KEY` or `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) for a literal `deepseek` key |
 | OpenRouter | `OPENROUTER_API_KEY` or `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) for a literal `openrouter` key |
 | ElevenLabs | `$ELEVENLABS_API_KEY` only, when it holds a usable literal key. That is the credential ElevenLabs' own CLI documents for non-interactive use and sends as the `xi-api-key` header. Stored expiry does not apply: the credential is a non-expiring API key. |
@@ -1050,13 +1052,13 @@ The Claude and Codex rows describe default discovery; [`--profile-only`](#profil
 
 **MiniMax**
 
-- It tries `MINIMAX_API_KEY`, then Pi auth, then MiniMax CLI config. Within CLI config, OAuth access is tried before a co-stored API key. Candidate handover follows the [Provider `state` rules](#provider-state); it never resolves templates, commands, cookies, or refresh tokens.
+- It tries `MINIMAX_API_KEY`, then Pi auth, then MiniMax CLI config, then opencode's `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` when set, otherwise `~/.local/share/opencode/auth.json`; `%LOCALAPPDATA%\opencode\auth.json` on Windows) for a literal `minimax-coding-plan` key. Within CLI config, OAuth access is tried before a co-stored API key. Candidate handover follows the [Provider `state` rules](#provider-state); it never resolves templates, commands, cookies, or refresh tokens.
 - It sends one redirect-disabled `GET` per attempted credential to `/v1/token_plan/remains` for bearer-style keys, or `/account/query_balance` for `sk-api-` keys. Each request has a 15 second deadline and a 262,144-byte decoded-body cap. HTTP 401/403 and application codes 1004/2049 are credential rejection; HTTP 429 and application code 1002 are rate limits, not permission to try another credential. Window normalization is documented under [Provider windows](#provider-windows).
 - It never launches the MiniMax CLI, performs a refresh-token exchange, writes credentials, or infers a quota from an inference request. Non-definitive failures - timeout, network, rate-limit, oversized or malformed responses, a missing quota payload, and unreadable credential stores - may reuse a formerly fresh snapshot that was captured for the same credential source and deployment host (see [Cache](#cache)); definitive provider-wide auth failure retires that cache only after candidates are exhausted.
 
 **MiMo**
 
-- It reads the literal `MIMO_API_KEY` environment value first, then Pi's `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`), where Xiaomi stores these keys under the vendor's own entry names rather than `mimo`: `xiaomi` (pay-as-you-go) and the `xiaomi-token-plan-sgp`, `xiaomi-token-plan-cn`, and `xiaomi-token-plan-ams` Token Plan clusters, consulted in that order. Each entry is its own source - `pi:xiaomi`, `pi:xiaomi-token-plan-sgp`, `pi:xiaomi-token-plan-cn`, `pi:xiaomi-token-plan-ams` - so attempts, `sourcesTried`, and `auth` name the exact entry that answered, while an absent entry never speaks for a sibling. Only a literal `type: "api_key"` record with a usable `key` is a credential; a present entry of any other shape reports as present but unusable, never as an absence, and marks `credentialPresent` in both the quota attempts and the `auth` source rows - as does an auth store that exists but could not be read. Environment, template, and command references are rejected rather than resolved.
+- It reads the literal `MIMO_API_KEY` environment value first, then Pi's `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`), where Xiaomi stores these keys under the vendor's own entry names rather than `mimo`: `xiaomi` (pay-as-you-go) and the `xiaomi-token-plan-sgp`, `xiaomi-token-plan-cn`, and `xiaomi-token-plan-ams` Token Plan clusters, consulted in that order. Each entry is its own source - `pi:xiaomi`, `pi:xiaomi-token-plan-sgp`, `pi:xiaomi-token-plan-cn`, `pi:xiaomi-token-plan-ams` - so attempts, `sourcesTried`, and `auth` name the exact entry that answered, while an absent entry never speaks for a sibling. It then reads opencode's `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` when set, otherwise `~/.local/share/opencode/auth.json`; `%LOCALAPPDATA%\opencode\auth.json` on Windows) as one more source under `opencode:auth.json`, for a literal key under `xiaomi-token-plan-sgp`: the id Xiaomi's OpenCode login writes the SGP Token Plan key to. Only a literal `type: "api_key"` record with a usable `key` is a credential; a present entry of any other shape reports as present but unusable, never as an absence, and marks `credentialPresent` in both the quota attempts and the `auth` source rows - as does an auth store that exists but could not be read. Environment, template, and command references are rejected rather than resolved.
 - MiMo's provider-owned setup exposes model authentication but no established read-only quota operation. A usable key therefore yields `authStatus: usable` with `windows: []`; the adapter sends no request at all, so quota-axi never probes an inference endpoint, sends cookies, or claims a model scope.
 
 **DeepSeek**

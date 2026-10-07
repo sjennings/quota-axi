@@ -1,14 +1,16 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMimoAdapter,
+  extractMimoOpencodeEntry,
   MIMO_ENV_SOURCE,
   MIMO_PI_PROVIDER_IDS,
   mimoPiSource,
   resolveMimoCredentials,
 } from "../../src/providers/mimo.js";
+import { OPENCODE_AUTH_SOURCE } from "../../src/providers/opencode-auth-store.js";
 
 const OPTIONS = { allowKeychainPrompt: false, refreshCredentials: false };
 const SYNTHETIC_MIMO_KEY = "synthetic-mimo-key";
@@ -16,19 +18,28 @@ const UNAVAILABLE = "mimo_credential_unavailable";
 const ALL_PI_SOURCES = MIMO_PI_PROVIDER_IDS.map(mimoPiSource);
 
 let piDir: string;
+let opencodeDir: string;
 const piPath = () => join(piDir, "auth.json");
+const opencodePath = () => join(opencodeDir, "opencode", "auth.json");
 
 beforeEach(() => {
   piDir = mkdtempSync(join(tmpdir(), "quota-axi-mimo-"));
+  opencodeDir = mkdtempSync(join(tmpdir(), "quota-axi-mimo-opencode-"));
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   rmSync(piDir, { recursive: true, force: true });
+  rmSync(opencodeDir, { recursive: true, force: true });
 });
 
 function writePiStore(store: unknown): void {
   writeFileSync(piPath(), JSON.stringify(store), { mode: 0o600 });
+}
+
+function writeOpencodeStore(store: unknown): void {
+  mkdirSync(dirname(opencodePath()), { recursive: true });
+  writeFileSync(opencodePath(), JSON.stringify(store), { mode: 0o600 });
 }
 
 /** Binds the adapter to this test's Pi store so no machine credential decides. */
@@ -37,7 +48,8 @@ function adapterFor(
 ) {
   return createMimoAdapter({
     now: () => Date.parse("2026-09-01T00:00:00.000Z"),
-    credential: () => resolveMimoCredentials(environment, piPath()),
+    credential: () =>
+      resolveMimoCredentials(environment, piPath(), opencodePath()),
   });
 }
 
@@ -129,7 +141,11 @@ describe("MiMo provider", () => {
 
   it("keeps a set-but-unusable API key visible as a credential rather than an absence", () => {
     expect(
-      resolveMimoCredentials({ MIMO_API_KEY: "${MIMO_API_KEY}" }, piPath()),
+      resolveMimoCredentials(
+        { MIMO_API_KEY: "${MIMO_API_KEY}" },
+        piPath(),
+        opencodePath(),
+      ),
     ).toEqual([
       { status: "invalid", source: MIMO_ENV_SOURCE },
       ...ALL_PI_SOURCES.map((source) => ({
@@ -137,18 +153,26 @@ describe("MiMo provider", () => {
         source,
         path: piPath(),
       })),
+      { status: "missing", source: OPENCODE_AUTH_SOURCE, path: opencodePath() },
     ]);
   });
 
   it("treats missing and blank API keys as absent sources", () => {
     for (const environment of [{}, { MIMO_API_KEY: "   " }]) {
-      expect(resolveMimoCredentials(environment, piPath())).toEqual([
+      expect(
+        resolveMimoCredentials(environment, piPath(), opencodePath()),
+      ).toEqual([
         { status: "missing", source: MIMO_ENV_SOURCE },
         ...ALL_PI_SOURCES.map((source) => ({
           status: "missing",
           source,
           path: piPath(),
         })),
+        {
+          status: "missing",
+          source: OPENCODE_AUTH_SOURCE,
+          path: opencodePath(),
+        },
       ]);
     }
   });
@@ -186,12 +210,17 @@ describe("MiMo provider", () => {
       state: {
         status: "auth_required",
         error: UNAVAILABLE,
-        sourcesTried: [MIMO_ENV_SOURCE, ...ALL_PI_SOURCES],
+        sourcesTried: [
+          MIMO_ENV_SOURCE,
+          ...ALL_PI_SOURCES,
+          OPENCODE_AUTH_SOURCE,
+        ],
       },
     });
     expect(report.attempts).toEqual([
       skipped(MIMO_ENV_SOURCE),
       ...ALL_PI_SOURCES.map(skipped),
+      skipped(OPENCODE_AUTH_SOURCE),
     ]);
     for (const attempt of report.attempts ?? []) {
       expect(attempt.credentialPresent).toBeUndefined();
@@ -293,6 +322,11 @@ describe("MiMo provider", () => {
           path: piPath(),
           status: "missing",
         })),
+        {
+          source: OPENCODE_AUTH_SOURCE,
+          path: opencodePath(),
+          status: "missing",
+        },
       ],
     });
   });
@@ -308,6 +342,100 @@ describe("MiMo provider", () => {
       status: "invalid",
       error: "mimo_credential_invalid",
       credentialPresent: true,
+    });
+  });
+
+  it("reads Xiaomi's SGP Token Plan login from opencode's auth store", async () => {
+    const fetch = stubNoFetch();
+    writeOpencodeStore({
+      "xiaomi-token-plan-sgp": { type: "api", key: SYNTHETIC_MIMO_KEY },
+    });
+
+    const report = await adapterFor().fetchQuota(OPTIONS);
+    const auth = await adapterFor().inspectAuth(OPTIONS);
+
+    expect(report).toMatchObject({
+      provider: "mimo",
+      source: "api",
+      windows: [],
+      state: {
+        status: "fresh",
+        stale: false,
+        authStatus: "usable",
+        sourcesTried: [
+          MIMO_ENV_SOURCE,
+          ...ALL_PI_SOURCES,
+          OPENCODE_AUTH_SOURCE,
+        ],
+      },
+      attempts: [
+        skipped(MIMO_ENV_SOURCE),
+        ...ALL_PI_SOURCES.map(skipped),
+        { source: OPENCODE_AUTH_SOURCE, status: "success" },
+      ],
+    });
+    expect(auth.sources).toContainEqual({
+      source: OPENCODE_AUTH_SOURCE,
+      path: opencodePath(),
+      status: "available",
+      credentialPresent: true,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("treats an opencode entry without a usable key as absent, per the Z.AI precedent", async () => {
+    writeOpencodeStore({ "xiaomi-token-plan-sgp": { type: "api" } });
+
+    const report = await adapterFor().fetchQuota(OPTIONS);
+
+    expect(report).toMatchObject({
+      source: "unavailable",
+      state: { status: "auth_required", error: UNAVAILABLE },
+    });
+    expect(report.attempts).toContainEqual({
+      source: OPENCODE_AUTH_SOURCE,
+      status: "skipped",
+      error: UNAVAILABLE,
+    });
+    for (const attempt of report.attempts ?? []) {
+      expect(attempt.credentialPresent).toBeUndefined();
+    }
+  });
+
+  it("marks an unparseable opencode store present rather than absent", async () => {
+    writeOpencodeStore("not-an-object");
+
+    const report = await adapterFor().fetchQuota(OPTIONS);
+
+    expect(report.attempts).toContainEqual({
+      source: OPENCODE_AUTH_SOURCE,
+      status: "failed",
+      error: "mimo_credential_invalid",
+      credentialPresent: true,
+    });
+  });
+
+  it("extracts only the declared opencode provider id", () => {
+    expect(
+      extractMimoOpencodeEntry(
+        { "xiaomi-token-plan-cn": { type: "api", key: "cn" } },
+        opencodePath(),
+      ),
+    ).toEqual({
+      status: "missing",
+      source: OPENCODE_AUTH_SOURCE,
+      path: opencodePath(),
+    });
+    expect(
+      extractMimoOpencodeEntry(
+        { "xiaomi-token-plan-sgp": { type: "api", key: "sgp" } },
+        opencodePath(),
+      ),
+    ).toEqual({
+      status: "available",
+      key: "sgp",
+      source: OPENCODE_AUTH_SOURCE,
+      path: opencodePath(),
     });
   });
 });

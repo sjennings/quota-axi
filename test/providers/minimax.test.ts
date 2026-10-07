@@ -6,21 +6,39 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMiniMaxAdapter,
   extractMiniMaxCliCredentials,
   extractMiniMaxCredential,
   normalizeMiniMaxPayload,
   resolveMiniMaxCredentials,
+  resolveMiniMaxOpencodeCredential,
 } from "../../src/providers/minimax.js";
+import { OPENCODE_AUTH_SOURCE } from "../../src/providers/opencode-auth-store.js";
 import { withQuotaSemantics } from "../../src/interpretation.js";
 
 const OPTIONS = { allowKeychainPrompt: false, refreshCredentials: false };
 const KEY = "synthetic-minimax-key-42";
 const fixture = (name: string): unknown =>
   JSON.parse(readFileSync(`test/fixtures/minimax/${name}.json`, "utf8"));
+
+const originalXdgDataHome = process.env.XDG_DATA_HOME;
+let opencodeRoot: string;
+const opencodePath = () => join(opencodeRoot, "opencode", "auth.json");
+
+beforeEach(() => {
+  // Sandbox opencode's auth store so the machine's real login never decides.
+  opencodeRoot = mkdtempSync(join(tmpdir(), "quota-axi-minimax-opencode-"));
+  process.env.XDG_DATA_HOME = opencodeRoot;
+});
+
+afterEach(() => {
+  if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = originalXdgDataHome;
+  rmSync(opencodeRoot, { recursive: true, force: true });
+});
 
 describe("MiniMax provider", () => {
   it("reads the first-party token-plan response and preserves model scopes", async () => {
@@ -736,6 +754,11 @@ describe("MiniMax provider", () => {
           source: "pi:minimax",
         },
         { status: "missing", source: "minimax:config.json" },
+        {
+          status: "missing",
+          source: OPENCODE_AUTH_SOURCE,
+          path: opencodePath(),
+        },
       ]);
     } finally {
       if (originalHome === undefined) delete process.env.HOME;
@@ -746,6 +769,92 @@ describe("MiniMax provider", () => {
       else process.env.MMX_CONFIG_DIR = originalMmxDir;
       if (originalApiKey === undefined) delete process.env.MINIMAX_API_KEY;
       else process.env.MINIMAX_API_KEY = originalApiKey;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a MiniMax Coding Plan login from opencode's auth store", async () => {
+    const originalPiDir = process.env.PI_CODING_AGENT_DIR;
+    const originalMmxDir = process.env.MMX_CONFIG_DIR;
+    const originalApiKey = process.env.MINIMAX_API_KEY;
+    const originalBaseUrl = process.env.MINIMAX_BASE_URL;
+    const tempDir = mkdtempSync(join(tmpdir(), "quota-axi-minimax-"));
+    try {
+      process.env.PI_CODING_AGENT_DIR = join(tempDir, "missing-pi");
+      process.env.MMX_CONFIG_DIR = join(tempDir, "missing-mmx");
+      delete process.env.MINIMAX_API_KEY;
+      delete process.env.MINIMAX_BASE_URL;
+      mkdirSync(dirname(opencodePath()), { recursive: true });
+      writeFileSync(
+        opencodePath(),
+        JSON.stringify({ "minimax-coding-plan": { type: "api", key: KEY } }),
+        { mode: 0o600 },
+      );
+
+      expect(resolveMiniMaxOpencodeCredential()).toEqual({
+        status: "available",
+        key: KEY,
+        source: OPENCODE_AUTH_SOURCE,
+        path: opencodePath(),
+        baseUrl: "https://api.minimax.io",
+      });
+
+      const request = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          expect(String(input)).toBe(
+            "https://api.minimax.io/v1/token_plan/remains",
+          );
+          expect(new Headers(init?.headers).get("authorization")).toBe(
+            `Bearer ${KEY}`,
+          );
+          return new Response(JSON.stringify(fixture("quota")), {
+            headers: { "content-type": "application/json" },
+          });
+        },
+      );
+      const adapter = createMiniMaxAdapter({
+        credential: resolveMiniMaxCredentials,
+        fetch: request,
+        now: () => Date.parse("2026-09-01T00:00:00.000Z"),
+      });
+
+      const report = await adapter.fetchQuota(OPTIONS);
+      const auth = await adapter.inspectAuth(OPTIONS);
+
+      expect(report).toMatchObject({
+        source: "api",
+        state: {
+          status: "fresh",
+          sourcesTried: [
+            "env:MINIMAX_API_KEY",
+            "pi:minimax",
+            "minimax:config.json",
+            OPENCODE_AUTH_SOURCE,
+          ],
+        },
+        attempts: [
+          { source: "env:MINIMAX_API_KEY", status: "skipped" },
+          { source: "pi:minimax", status: "skipped" },
+          { source: "minimax:config.json", status: "skipped" },
+          { source: OPENCODE_AUTH_SOURCE, status: "success" },
+        ],
+      });
+      expect(auth.sources).toContainEqual({
+        source: OPENCODE_AUTH_SOURCE,
+        path: opencodePath(),
+        status: "available",
+        credentialPresent: true,
+      });
+      expect(request).toHaveBeenCalledOnce();
+    } finally {
+      if (originalPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = originalPiDir;
+      if (originalMmxDir === undefined) delete process.env.MMX_CONFIG_DIR;
+      else process.env.MMX_CONFIG_DIR = originalMmxDir;
+      if (originalApiKey === undefined) delete process.env.MINIMAX_API_KEY;
+      else process.env.MINIMAX_API_KEY = originalApiKey;
+      if (originalBaseUrl === undefined) delete process.env.MINIMAX_BASE_URL;
+      else process.env.MINIMAX_BASE_URL = originalBaseUrl;
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -895,6 +1004,11 @@ describe("MiniMax provider", () => {
             status: "failed",
             error: "credential_resolution_failed",
           },
+          {
+            source: OPENCODE_AUTH_SOURCE,
+            status: "skipped",
+            error: "minimax_credential_unavailable",
+          },
         ],
       });
       expect(deleteCachedProvider).not.toHaveBeenCalled();
@@ -1031,6 +1145,11 @@ describe("MiniMax provider", () => {
             status: "skipped",
             error: "minimax_credential_unavailable",
           },
+          {
+            source: OPENCODE_AUTH_SOURCE,
+            status: "skipped",
+            error: "minimax_credential_unavailable",
+          },
         ],
       });
       expect(deleteCachedProvider).not.toHaveBeenCalled();
@@ -1048,6 +1167,10 @@ describe("MiniMax provider", () => {
         }),
         expect.objectContaining({
           source: "minimax:config.json",
+          status: "missing",
+        }),
+        expect.objectContaining({
+          source: OPENCODE_AUTH_SOURCE,
           status: "missing",
         }),
       ]);

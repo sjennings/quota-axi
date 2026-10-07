@@ -13,6 +13,10 @@ import { classifyPiAuthEntry } from "../lib/pi-auth-store.js";
 import { usableLiteralSecret } from "../lib/secret.js";
 import { clampPercent, retryAfterToIso } from "../lib/time.js";
 import { publishMiniMaxReadingContextId } from "./minimax-cache-context.js";
+import {
+  createOpencodeAuthCredentialSource,
+  OPENCODE_AUTH_SOURCE,
+} from "./opencode-auth-store.js";
 import type {
   AuthProviderReport,
   AuthSourceReport,
@@ -37,6 +41,13 @@ export const MINIMAX_CHINA_BASE_URL = "https://api.minimaxi.com";
 export const MINIMAX_PI_SOURCE = "pi:minimax";
 export const MINIMAX_CLI_SOURCE = "minimax:config.json";
 export const MINIMAX_ENV_SOURCE = "env:MINIMAX_API_KEY";
+
+/**
+ * The opencode auth-store provider id that authenticates this quota family.
+ * A MiniMax Coding Plan login in opencode lands here; the same provider id in
+ * Pi is `minimax`, which its own source already reads.
+ */
+export const MINIMAX_OPENCODE_PROVIDER_IDS = ["minimax-coding-plan"] as const;
 
 const LABEL = "MiniMax";
 const CONFIG_FILE_LIMIT_BYTES = 64 * 1024;
@@ -220,7 +231,35 @@ export function resolveMiniMaxCredentials(): MiniMaxCredentialResolution[] {
     credentials.push(missingCliCredential(cliPath));
   }
 
+  credentials.push(resolveMiniMaxOpencodeCredential());
+
   return credentials;
+}
+
+/**
+ * opencode's auth store, read through the shared opencode reader: a MiniMax
+ * Coding Plan login there is a first-party credential, and the deployment the
+ * key targets is the configured base URL because the opencode provider id names
+ * the global plan.
+ */
+export function resolveMiniMaxOpencodeCredential(): MiniMaxCredentialResolution {
+  const resolution = createOpencodeAuthCredentialSource(
+    MINIMAX_OPENCODE_PROVIDER_IDS,
+  ).resolve();
+  if (resolution.status === "available")
+    return {
+      status: "available",
+      key: resolution.key,
+      source: OPENCODE_AUTH_SOURCE,
+      path: resolution.path,
+      baseUrl: configuredBaseUrl(),
+    };
+  return {
+    status: resolution.status,
+    source: OPENCODE_AUTH_SOURCE,
+    path: resolution.path,
+    ...(resolution.error ? { error: resolution.error } : {}),
+  };
 }
 
 export function createMiniMaxAdapter(

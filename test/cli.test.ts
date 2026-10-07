@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseFlags, parseModelsFlags } from "../src/args.js";
 import { main, normalizeArgv } from "../src/cli.js";
 import { authCommand, quotaCommand } from "../src/commands.js";
@@ -49,7 +49,16 @@ const originalDeepSeekApiKey = process.env.DEEPSEEK_API_KEY;
 const originalOpenRouterApiKey = process.env.OPENROUTER_API_KEY;
 const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalMmxConfigDir = process.env.MMX_CONFIG_DIR;
+const originalXdgDataHome = process.env.XDG_DATA_HOME;
 let tempDir: string | undefined;
+let xdgDataRoot: string;
+
+beforeEach(() => {
+  // Keep opencode's auth store out of every provider read so the machine's
+  // real login never decides a test result.
+  xdgDataRoot = mkdtempSync(join(tmpdir(), "quota-axi-cli-data-"));
+  process.env.XDG_DATA_HOME = xdgDataRoot;
+});
 
 afterEach(() => {
   PROVIDERS.claude = originalClaudeProvider;
@@ -82,6 +91,8 @@ afterEach(() => {
   restoreEnvironment("OPENROUTER_API_KEY", originalOpenRouterApiKey);
   restoreEnvironment("PI_CODING_AGENT_DIR", originalPiCodingAgentDir);
   restoreEnvironment("MMX_CONFIG_DIR", originalMmxConfigDir);
+  restoreEnvironment("XDG_DATA_HOME", originalXdgDataHome);
+  rmSync(xdgDataRoot, { recursive: true, force: true });
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = undefined;
   process.exitCode = undefined;
@@ -1686,6 +1697,7 @@ describe("new provider public quota output", () => {
             "pi:xiaomi-token-plan-sgp",
             "pi:xiaomi-token-plan-cn",
             "pi:xiaomi-token-plan-ams",
+            "opencode:auth.json",
           ],
         },
       }),
@@ -1724,6 +1736,10 @@ describe("new provider public quota output", () => {
           }),
           expect.objectContaining({
             source: "minimax:config.json",
+            status: "missing",
+          }),
+          expect.objectContaining({
+            source: "opencode:auth.json",
             status: "missing",
           }),
         ],

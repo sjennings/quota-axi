@@ -3,8 +3,6 @@
 // and the vendor plugin zai-org/zai-coding-plugins. No third-party code is
 // vendored here; the HTTP layer and normalization are an original implementation.
 
-import { homedir } from "node:os";
-import { join } from "node:path";
 import {
   deleteCachedProvider as deleteCachedProviderFromDisk,
   readCachedProvider as readCachedProviderFromDisk,
@@ -14,6 +12,11 @@ import { providerFetch } from "../lib/http.js";
 import { resolvePiAuthFilePath } from "../lib/pi-agent-dir.js";
 import { classifyPiAuthEntry } from "../lib/pi-auth-store.js";
 import { usableLiteralSecret } from "../lib/secret.js";
+import {
+  extractOpencodeEntryKey,
+  OPENCODE_AUTH_SOURCE,
+  opencodeAuthFilePath,
+} from "./opencode-auth-store.js";
 import type {
   AuthProviderReport,
   AuthSourceReport,
@@ -27,6 +30,8 @@ import type {
 import { VERSION } from "../version.js";
 import { servableStaleWindows, servableUntrustedWindowIds } from "./common.js";
 
+export { opencodeAuthFilePath };
+
 const ZAI_QUOTA_PATH = "/api/monitor/usage/quota/limit";
 const OPERATION_DEADLINE_MS = 15_000;
 const RESPONSE_LIMIT_BYTES = 262_144;
@@ -34,7 +39,6 @@ const FIVE_HOURS_SECONDS = 18_000;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const ZAI_HOST = "api.z.ai";
 const ZHIPU_HOST = "open.bigmodel.cn";
-const OPENCODE_AUTH_SOURCE = "opencode:auth.json";
 const PI_ZAI_SOURCE = "pi:zai";
 const PI_ZAI_PROVIDER_ID = "zai";
 const USER_AGENT = `quota-axi/${VERSION}`;
@@ -44,14 +48,6 @@ const zaiProviderFetch: typeof globalThis.fetch = (input, init) =>
 
 const ZAI_PROVIDER_IDS = ["zai-coding-plan", "zai", "z-ai", "z.ai"];
 const ZHIPU_PROVIDER_IDS = ["zhipu", "zhipuai"];
-const CREDENTIAL_KEYS = [
-  "key",
-  "apiKey",
-  "api_key",
-  "token",
-  "accessToken",
-  "auth_token",
-];
 
 export type ZaiDiagnostic =
   | { code: "entry_invalid"; index: number }
@@ -106,16 +102,6 @@ type ResponseBodyLifetime = {
   cancel(action?: () => Promise<unknown> | undefined): Promise<void>;
 };
 
-export function opencodeAuthFilePath(): string {
-  const xdg = stringValue(process.env.XDG_DATA_HOME);
-  if (xdg) return join(xdg, "opencode", "auth.json");
-  if (process.platform === "win32") {
-    const localAppData = stringValue(process.env.LOCALAPPDATA);
-    if (localAppData) return join(localAppData, "opencode", "auth.json");
-  }
-  return join(homedir(), ".local", "share", "opencode", "auth.json");
-}
-
 export function extractZaiCredential(
   value: unknown,
   path: string,
@@ -126,7 +112,7 @@ export function extractZaiCredential(
     const entry = data[providerId];
     if (entry === undefined || entry === null) continue;
     const host = ZAI_PROVIDER_IDS.includes(providerId) ? ZAI_HOST : ZHIPU_HOST;
-    const key = extractKey(entry);
+    const key = extractOpencodeEntryKey(entry);
     if (key) return { status: "available", apiKey: key, host, path };
   }
   return { status: "missing", path };
@@ -875,17 +861,6 @@ export function normalizeRetryAfter(
   } catch {
     return undefined;
   }
-}
-
-function extractKey(entry: unknown): string | undefined {
-  if (typeof entry === "string") return usableLiteralSecret(entry);
-  const obj = objectValue(entry);
-  if (!obj) return undefined;
-  for (const key of CREDENTIAL_KEYS) {
-    const value = usableLiteralSecret(obj[key]);
-    if (value !== undefined) return value;
-  }
-  return undefined;
 }
 
 function localTransportCode(

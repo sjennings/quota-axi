@@ -18,6 +18,11 @@ import {
   pushEnvCredential,
   pushPiReadCredential,
 } from "./env-pi-credential.js";
+import {
+  extractOpencodeAuthKey,
+  OPENCODE_AUTH_SOURCE,
+  opencodeAuthFilePath,
+} from "./opencode-auth-store.js";
 
 export const MIMO_ENV_SOURCE = "env:MIMO_API_KEY";
 
@@ -36,6 +41,14 @@ export const MIMO_PI_PROVIDER_IDS = [
   "xiaomi-token-plan-ams",
 ] as const;
 
+/**
+ * The opencode auth-store provider id that authenticates this quota family.
+ * Xiaomi's OpenCode login stores the SGP Token Plan key under the vendor's own
+ * provider id, so the shared `opencode:auth.json` source reads it as one more
+ * MiMo credential after the Pi entries.
+ */
+export const MIMO_OPENCODE_PROVIDER_IDS = ["xiaomi-token-plan-sgp"] as const;
+
 /** Attempt and inspection source name for one Pi entry. */
 export function mimoPiSource(piProviderId: string): string {
   return `pi:${piProviderId}`;
@@ -51,6 +64,7 @@ type MimoDependencies = {
 export function resolveMimoCredentials(
   environment: Readonly<Record<string, string | undefined>> = process.env,
   path = resolvePiAuthFilePath(),
+  opencodePath = opencodeAuthFilePath(),
 ): EnvPiCredentialResolution[] {
   const credentials: EnvPiCredentialResolution[] = [];
   pushEnvCredential(credentials, environment, "MIMO_API_KEY", MIMO_ENV_SOURCE);
@@ -64,7 +78,38 @@ export function resolveMimoCredentials(
       (value) => extractMimoPiEntry(value, piProviderId, path),
     );
   }
+  pushPiReadCredential(
+    credentials,
+    readJsonFileResult(opencodePath),
+    OPENCODE_AUTH_SOURCE,
+    opencodePath,
+    (value) => extractMimoOpencodeEntry(value, opencodePath),
+  );
   return credentials;
+}
+
+/**
+ * The opencode half of MiMo's credential surface: Xiaomi's `xiaomi-token-plan-sgp`
+ * provider id in opencode's store is a usable literal key or it is absent, and
+ * the shared reader owns the file's read-status classification.
+ */
+export function extractMimoOpencodeEntry(
+  value: unknown,
+  path: string,
+): EnvPiCredentialResolution {
+  const resolution = extractOpencodeAuthKey(
+    value,
+    MIMO_OPENCODE_PROVIDER_IDS,
+    path,
+  );
+  return resolution.status === "available"
+    ? {
+        status: "available",
+        key: resolution.key,
+        source: OPENCODE_AUTH_SOURCE,
+        path,
+      }
+    : { status: resolution.status, source: OPENCODE_AUTH_SOURCE, path };
 }
 
 /**
