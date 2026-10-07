@@ -40,6 +40,8 @@ export type QuotaFlags = {
    * `0` always asks. Absent, the caller falls back to {@link MAX_AGE_ENV}.
    */
   maxAgeSeconds?: number;
+  /** In-flight worker file; absent, the caller falls back to `QUOTA_AXI_INFLIGHT`. */
+  inflightFile?: string;
 };
 
 /** Refresh bounds: fast enough to feel live, slow enough to stay polite. */
@@ -128,6 +130,7 @@ function parseCommonFlags(
   let all = false;
   let refreshSeconds: number | undefined;
   let maxAgeSeconds: number | undefined;
+  let inflightFile: string | undefined;
   let allowKeychainPrompt = false;
   let allowClaudeInference = false;
   let noCredentialRefresh = false;
@@ -176,6 +179,15 @@ function parseCommonFlags(
     }
     if (arg.startsWith("--max-age=")) {
       maxAgeSeconds = parseMaxAgeValue(arg.slice("--max-age=".length));
+      continue;
+    }
+    if (arg === "--inflight") {
+      inflightFile = parseInflightValue(args[index + 1]);
+      index++;
+      continue;
+    }
+    if (arg.startsWith("--inflight=")) {
+      inflightFile = parseInflightValue(arg.slice("--inflight=".length));
       continue;
     }
     if (arg === "--allow-keychain-prompt") {
@@ -277,6 +289,7 @@ function parseCommonFlags(
     profileOnly,
     ...(refreshSeconds !== undefined ? { refreshSeconds } : {}),
     ...(maxAgeSeconds !== undefined ? { maxAgeSeconds } : {}),
+    ...(inflightFile !== undefined ? { inflightFile } : {}),
     ...(intelligence ? { intelligence } : {}),
     ...(sort ? { sort } : {}),
   };
@@ -360,6 +373,15 @@ function parseMaxAgeValue(
     );
   }
   return seconds;
+}
+
+function parseInflightValue(value: string | undefined): string {
+  if (value === undefined || value.trim() === "") {
+    throw new AxiError("--inflight requires a file path", "VALIDATION_ERROR", [
+      "Pass --inflight=... if the path begins with --",
+    ]);
+  }
+  return value;
 }
 
 function parseSortValue(value: string | undefined): ModelSortKey {

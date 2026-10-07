@@ -12,6 +12,8 @@ for (const name of [
   "ALL_PROXY",
   "all_proxy",
   "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+  // The host's in-flight worker file must never fold into a test's reading.
+  "QUOTA_AXI_INFLIGHT",
 ]) {
   delete process.env[name];
 }

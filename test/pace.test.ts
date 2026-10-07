@@ -850,11 +850,12 @@ describe("summarizeEffectiveSelection", () => {
   }
 
   it("is positive when allowance is projected to reach reset unused", () => {
+    // 80 / 40 - 1 = 1, credited for the 60% of the long window that elapsed.
     expect(
       summarizeEffectiveSelection([
         bounded("weekly", 80, { timeRemainingPercent: 40, burnMultiple: 1 }),
       ]),
-    ).toEqual({ status: "known", [SELECTION_SCALAR_KEY]: 1 });
+    ).toEqual({ status: "known", [SELECTION_SCALAR_KEY]: 0.6 });
   });
 
   it("is exactly zero at perfect utilization", () => {
@@ -899,7 +900,8 @@ describe("summarizeEffectiveSelection", () => {
       cycleSeconds: WEEK_SECONDS,
     });
     const sessionGap = 90 / 60 - 0.25;
-    const weeklyGap = 80 / 50 - 0.7;
+    // The weekly window is long, so its credit scales with the 50% elapsed.
+    const weeklyGap = (80 / 50 - 0.7) * 0.5;
     const weighted =
       (sessionGap * FIVE_HOURS_SECONDS + weeklyGap * WEEK_SECONDS) /
       (FIVE_HOURS_SECONDS + WEEK_SECONDS);
@@ -1030,9 +1032,10 @@ describe("summarizeEffectiveSelection", () => {
       burnMultiple: 0.5,
     });
 
+    // (51 / 40 - 0.5) credited for the 60% of the weekly window elapsed.
     expect(summarizeEffectiveSelection([fiveHour, weekly])).toEqual({
       status: "known",
-      [SELECTION_SCALAR_KEY]: 0.775,
+      [SELECTION_SCALAR_KEY]: 0.465,
     });
   });
 

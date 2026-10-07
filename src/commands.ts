@@ -16,7 +16,14 @@ import {
 } from "./cache.js";
 import { takeFetchTurn } from "./lib/fetch-lock.js";
 import { withInputTrace } from "./lib/input-trace.js";
-import { withQuotaSemantics } from "./interpretation.js";
+import {
+  INFLIGHT_ENV,
+  laneWorkerCount,
+  readInflightInput,
+  scopeWorkers,
+  type InflightEntry,
+} from "./inflight.js";
+import { withQuotaSemantics, type LaneInflight } from "./interpretation.js";
 import { createModelsResponse, MODEL_CATALOG_PROVIDER_IDS } from "./models.js";
 import { providerPresence } from "./lib/source-attempts.js";
 import { readTuiShowPreference } from "./lib/user-config.js";
@@ -36,6 +43,12 @@ import {
   renderQuotaToon,
 } from "./render.js";
 import { formatInterval, runLiveTui, type LiveTuiIo } from "./tui-live.js";
+import {
+  observedBurnRates,
+  observeWindows,
+  updateWindowObservationLedger,
+  type WindowObservationLedger,
+} from "./window-observations.js";
 import {
   detectTuiColorDepth,
   renderQuotaTui,
@@ -73,14 +86,18 @@ export async function quotaCommand(
   };
 
   const maxAgeSeconds = flags.profileOnly ? 0 : readMaxAge(flags);
+  const inflightFile = readInflightFile(flags);
 
-  if (flags.tui) return quotaTuiReport(flags, options, maxAgeSeconds);
+  if (flags.tui) {
+    return quotaTuiReport(flags, options, maxAgeSeconds, inflightFile);
+  }
 
   const response = await loadQuota(
     flags.providers,
     options,
     false,
     maxAgeSeconds,
+    inflightFile,
   );
   // Presence reads source attempts, which redaction removes, so both the JSON
   // marker and the TOON omission are classified on the complete model first.
@@ -138,6 +155,7 @@ async function quotaTuiReport(
   flags: QuotaFlags,
   options: ProviderOptions,
   maxAgeSeconds: number,
+  inflightFile: string | undefined,
 ): Promise<string> {
   // A human display preference, so it is read only on this path: TOON and
   // JSON never see it.
@@ -170,7 +188,13 @@ async function quotaTuiReport(
 
   if (flags.once || !isInteractiveTerminal()) {
     return frame(
-      await loadQuota(flags.providers, options, false, maxAgeSeconds),
+      await loadQuota(
+        flags.providers,
+        options,
+        false,
+        maxAgeSeconds,
+        inflightFile,
+      ),
     );
   }
 
@@ -199,6 +223,7 @@ async function quotaTuiReport(
           : trigger === "tick"
             ? tickMaxAgeSeconds
             : maxAgeSeconds,
+        inflightFile,
       ),
     render: frame,
     status: (scroll) =>
@@ -268,8 +293,14 @@ async function loadQuota(
   options: ProviderOptions,
   live: boolean,
   maxAgeSeconds: number,
+  inflightFile: string | undefined,
 ): Promise<QuotaAxiResponse> {
-  const response = await fetchQuota(providers, options, maxAgeSeconds);
+  const response = await fetchQuota(
+    providers,
+    options,
+    maxAgeSeconds,
+    inflightFile,
+  );
   const allFailed = response.providers.every(isFailed);
   if (allFailed) process.exitCode = 1;
   else if (live) process.exitCode = undefined;
@@ -286,7 +317,12 @@ export async function modelsCommand(
     allowKeychainPrompt: flags.allowKeychainPrompt,
     refreshCredentials: !flags.noCredentialRefresh,
   };
-  const quota = await fetchQuota(flags.providers, options, readMaxAge(flags));
+  const quota = await fetchQuota(
+    flags.providers,
+    options,
+    readMaxAge(flags),
+    readInflightFile(flags),
+  );
   const response = createModelsResponse(quota, {
     ...(flags.intelligence ? { intelligence: flags.intelligence } : {}),
     ...(flags.sort ? { sort: flags.sort } : {}),
@@ -328,6 +364,13 @@ export async function authCommand(
       "--tui is only supported by the quota command",
       "VALIDATION_ERROR",
       ["Run `quota-axi --tui` for the human quota report"],
+    );
+  }
+  if (flags.inflightFile !== undefined) {
+    throw new AxiError(
+      "--inflight is only supported by the quota and models commands",
+      "VALIDATION_ERROR",
+      ["auth reports credential sources, not quota"],
     );
   }
   if (flags.maxAgeSeconds !== undefined) {
@@ -395,6 +438,7 @@ export async function fetchQuota(
   providers: ProviderId[],
   options: ProviderOptions,
   maxAgeSeconds = 0,
+  inflightFile?: string,
 ): Promise<QuotaAxiResponse> {
   const snapshot = snapshotFile();
   // A mistyped fixture path would otherwise read as a fixture naming no provider
@@ -428,8 +472,20 @@ export async function fetchQuota(
   // stamp taken before the request would read an unopened window as
   // `future_cycle_start` by the request latency.
   const generatedAt = nowIso();
-  const results = fetched.map((provider) =>
-    withQuotaSemantics(provider, generatedAt),
+  const inflight =
+    inflightFile === undefined
+      ? undefined
+      : readInflightInput(inflightFile, Date.parse(generatedAt));
+  const entries = inflight?.entries ?? [];
+  const { readings, ledger } = writesCache
+    ? observeReadings(fetched, generatedAt, entries)
+    : { readings: fetched, ledger: undefined };
+  const results = readings.map((provider) =>
+    withQuotaSemantics(
+      provider,
+      generatedAt,
+      laneInflight(entries, provider, ledger),
+    ),
   );
   if (writesCache) {
     writeCachedProvidersBestEffort(
@@ -440,7 +496,53 @@ export async function fetchQuota(
   return annotateQuotaAdvice({
     generatedAt,
     providers: results,
+    ...(inflight ? { inflight: inflight.state } : {}),
   });
+}
+
+/**
+ * Compare this report with quota-axi's earlier readings, recognizing a vendor
+ * reset ahead of schedule and measuring per-worker burn. Best effort: when the
+ * ledger cannot be used the readings are unchanged.
+ */
+function observeReadings(
+  fetched: ProviderQuota[],
+  generatedAt: string,
+  entries: readonly InflightEntry[],
+): { readings: ProviderQuota[]; ledger?: WindowObservationLedger } {
+  try {
+    return updateWindowObservationLedger((previous) => {
+      const observed = observeWindows(previous, fetched, generatedAt, (lane) =>
+        laneWorkerCount(entries, lane),
+      );
+      return { ledger: observed.ledger, result: observed };
+    });
+  } catch {
+    return { readings: fetched };
+  }
+}
+
+function laneInflight(
+  entries: readonly InflightEntry[],
+  provider: ProviderQuota,
+  ledger: WindowObservationLedger | undefined,
+): LaneInflight | undefined {
+  if (!entries.some((entry) => entry.provider === provider.provider)) {
+    return undefined;
+  }
+  const rates = ledger ? observedBurnRates(ledger, provider) : new Map();
+  return {
+    scope: (scope) => scopeWorkers(entries, provider, scope),
+    observedPercentPerWorkerHour: (windowId) => rates.get(windowId),
+  };
+}
+
+/**
+ * The in-flight file: `--inflight`, else the host's {@link INFLIGHT_ENV}, else
+ * none, so worker accounting is opt-in and a plain read is unchanged.
+ */
+function readInflightFile(flags: QuotaFlags): string | undefined {
+  return flags.inflightFile ?? (process.env[INFLIGHT_ENV]?.trim() || undefined);
 }
 
 /**

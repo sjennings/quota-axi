@@ -101,7 +101,11 @@ export type QuotaPace = {
   /** Linear cycle-average exhaustion timestamp when defined. */
   projectedExhaustedAt?: string;
   projectionConfidence?: "early" | "established";
-  cycleBasis?: "starts_at_resets_at" | "window_seconds";
+  /**
+   * `observed_reset` means quota-axi saw the vendor reset this window before
+   * its schedule and restarted a full cycle at `QuotaWindow.observedResetAt`.
+   */
+  cycleBasis?: "starts_at_resets_at" | "window_seconds" | "observed_reset";
   cycleSeconds?: number;
 };
 
@@ -163,6 +167,11 @@ export const SELECTION_SCALAR_KEY = "spendPriority";
  * `burnMultiple` 1 each term reduces to the window's `reservePercentPoints`
  * over the same denominator.
  *
+ * A positive term of a window whose cycle is six days or longer is credited
+ * only for the elapsed share of that cycle, so an early, barely used week is
+ * not read as freely spendable. In-flight workers, when named, raise a
+ * window's `burnMultiple` to the faster of the observed one and their load.
+ *
  * It is comparative data, not a ranking, an ordering, or a recommendation, and
  * it never supersedes `runway` as the completion-risk gate.
  */
@@ -219,6 +228,13 @@ export type QuotaWindow = {
   usedCredits?: number;
   remainingCredits?: number;
   creditUnit?: string;
+  /**
+   * When quota-axi observed the vendor reset this window before its reported
+   * `resetsAt` (remaining jumped back to full on an unchanged schedule). Pace,
+   * runway, and selection then run a full cycle from this instant. Derived
+   * from quota-axi's own earlier readings, never predicted. Not cached.
+   */
+  observedResetAt?: string;
   /** Cycle-average pace relative to generatedAt. Not cached. */
   pace?: QuotaPace;
 };
@@ -249,6 +265,39 @@ export type EffectiveAvailability = {
    * routes. Not cached.
    */
   selection?: EffectiveSelection;
+  /**
+   * In-flight worker load folded into `runway` and `selection`, present only
+   * when the in-flight input names workers for this scope. Not cached.
+   */
+  inflight?: ScopeInflight;
+};
+
+/** Where a per-worker burn estimate came from. */
+export type InflightBurnBasis = "observed" | "fallback";
+
+export type ScopeInflight = {
+  /** Live workers drawing on this scope, as the in-flight input reports. */
+  workers: number;
+  /** Per bounding window: the per-worker burn the projection assumed. */
+  windows: Array<{
+    windowId: string;
+    /** Percentage points of the window one worker spends per hour. */
+    percentPerWorkerHour: number;
+    basis: InflightBurnBasis;
+  }>;
+};
+
+/**
+ * Report-level state of the in-flight input. Present only when an in-flight
+ * file was named. `stale` is still folded in, because in-flight load can only
+ * lower a reading; `missing` and `malformed` fold nothing in.
+ */
+export type InflightInputState = {
+  status: "applied" | "stale" | "missing" | "malformed";
+  /** The file's own `updatedAt`, when it parsed. */
+  updatedAt?: string;
+  /** Why the file was not applied, for `missing` and `malformed`. */
+  error?: string;
 };
 
 export type QuotaSemantics = {
@@ -374,6 +423,8 @@ export type QuotaAxiResponse = {
   generatedAt: string;
   schemaVersion: 5 | 6;
   providers: ProviderQuota[];
+  /** Present only when an in-flight input file was named. */
+  inflight?: InflightInputState;
   help?: string[];
 };
 

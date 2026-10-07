@@ -144,6 +144,11 @@ export function museKeyReadLedgerPath(): string {
   return join(cacheDirPath(), "muse-key-reads.json");
 }
 
+/** Path of the window observation ledger, beside the quota cache. */
+export function windowObservationLedgerPath(): string {
+  return join(cacheDirPath(), "window-observations.json");
+}
+
 function cacheDirPath(): string {
   const base = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
   return join(base, "quota-axi");

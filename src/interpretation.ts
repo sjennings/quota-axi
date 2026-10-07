@@ -1,3 +1,4 @@
+import type { ScopeWorkers } from "./inflight.js";
 import { degradedSources } from "./lib/source-attempts.js";
 import {
   computeEffectiveRunway,
@@ -11,7 +12,15 @@ import type {
   ProviderQuota,
   QuotaSemantics,
   QuotaWindow,
+  ScopeInflight,
 } from "./types.js";
+
+/** The in-flight load the input names for one provider lane. */
+export type LaneInflight = {
+  scope(scope: string): ScopeWorkers | undefined;
+  /** Per-worker burn quota-axi measured for a window, when it has one. */
+  observedPercentPerWorkerHour(windowId: string): number | undefined;
+};
 
 export function markAgyStaleIfExpiredReset(
   provider: ProviderQuota,
@@ -41,6 +50,7 @@ export function markAgyStaleIfExpiredReset(
 export function withQuotaSemantics(
   provider: ProviderQuota,
   generatedAt: string,
+  inflight?: LaneInflight,
 ): ProviderQuota {
   if (provider.provider === "agy") {
     provider = markAgyStaleIfExpiredReset(provider, Date.parse(generatedAt));
@@ -58,7 +68,59 @@ export function withQuotaSemantics(
     state: { ...provider.state, ...supersededSources(provider) },
     quotaSemantics: provider.state.stale
       ? staleSemantics(semantics)
-      : semantics,
+      : inflight
+        ? withInflight(semantics, windows, generatedAt, inflight)
+        : semantics,
+  };
+}
+
+/**
+ * Fold the in-flight load into each scope it draws on. Runway and selection
+ * are recomputed only where they were already measurable, and the load can
+ * only bring exhaustion closer and lower the scalar, so an in-flight input
+ * never makes a scope read healthier or more certain than without it.
+ */
+function withInflight(
+  semantics: QuotaSemantics,
+  windows: QuotaWindow[],
+  generatedAt: string,
+  inflight: LaneInflight,
+): QuotaSemantics {
+  return {
+    ...semantics,
+    effectiveAvailability: semantics.effectiveAvailability.map((scope) => {
+      const load = inflight.scope(scope.scope);
+      if (!load || scope.boundConflict) return scope;
+      const bounds = scope.boundedBy
+        .map((id) => windows.find((window) => window.id === id))
+        .filter((window): window is QuotaWindow => window !== undefined);
+      const rates: ScopeInflight["windows"] = bounds.map(({ id }) => {
+        const observed = inflight.observedPercentPerWorkerHour(id);
+        return observed === undefined
+          ? {
+              windowId: id,
+              percentPerWorkerHour: load.fallbackPercentPerWorkerHour,
+              basis: "fallback",
+            }
+          : { windowId: id, percentPerWorkerHour: observed, basis: "observed" };
+      });
+      const perHour = new Map(
+        rates.map(({ windowId, percentPerWorkerHour }) => [
+          windowId,
+          percentPerWorkerHour * load.workers,
+        ]),
+      );
+      return {
+        ...scope,
+        ...(scope.runway && scope.runway.status !== "unknown"
+          ? { runway: computeEffectiveRunway(bounds, generatedAt, perHour) }
+          : {}),
+        ...(scope.selection?.status === "known"
+          ? { selection: summarizeEffectiveSelection(bounds, perHour) }
+          : {}),
+        inflight: { workers: load.workers, windows: rates },
+      };
+    }),
   };
 }
 

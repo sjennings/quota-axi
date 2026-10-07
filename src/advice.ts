@@ -48,6 +48,7 @@ export function annotateQuotaAdvice(
     generatedAt: response.generatedAt,
     schemaVersion: providers.some((provider) => provider.accountKey) ? 6 : 5,
     providers,
+    ...(response.inflight ? { inflight: response.inflight } : {}),
     ...(help.length > 0 ? { help } : {}),
   };
 }
